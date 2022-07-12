@@ -1,5 +1,7 @@
 import multiprocessing
 import os
+import signal
+import traceback
 import types
 from enum import Enum
 from multiprocessing.connection import Connection
@@ -19,6 +21,37 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
 from opentelemetry.trace import NonRecordingSpan, SpanContext
 
 
+class timeout:
+    """A context manager that times out after a given number of seconds."""
+
+    def __init__(
+        self,
+        seconds: Optional[int],
+        elapsed: Optional[int] = None,
+        error_message: str = "Prediction timed out",
+    ) -> None:
+        if elapsed is None or seconds is None:
+            self.seconds = seconds
+        else:
+            self.seconds = seconds - int(elapsed)
+        self.error_message = error_message
+
+    def handle_timeout(self, signum: Any, frame: Any) -> None:
+        raise TimeoutError(self.error_message)
+
+    def __enter__(self) -> None:
+        if self.seconds is not None:
+            if self.seconds <= 0:
+                self.handle_timeout(None, None)
+            else:
+                signal.signal(signal.SIGALRM, self.handle_timeout)
+                signal.alarm(self.seconds)
+
+    def __exit__(self, type: Any, value: Any, traceback: Any) -> None:
+        if self.seconds is not None:
+            signal.alarm(0)
+
+
 class PredictionRunner:
     PROCESSING_DONE = 1
     EXIT_SENTINEL = "exit"
@@ -28,7 +61,7 @@ class PredictionRunner:
         SINGLE = 1
         GENERATOR = 2
 
-    def __init__(self) -> None:
+    def __init__(self, predict_timeout: Optional[int] = None) -> None:
         self.logs_pipe_reader, self.logs_pipe_writer = multiprocessing.Pipe(
             duplex=False
         )
@@ -45,6 +78,7 @@ class PredictionRunner:
         self.done_pipe_reader, self.done_pipe_writer = multiprocessing.Pipe(
             duplex=False
         )
+        self.predict_timeout = predict_timeout
 
     def setup(self) -> None:
         """
@@ -221,28 +255,32 @@ class PredictionRunner:
         drain_pipe(self.done_pipe_reader)
 
         with capture_log(self.logs_pipe_writer):
-            try:
-                tracer = trace.get_tracer("cog")
-                with tracer.start_as_current_span(
-                    name="predictor.predict",
-                    context=trace.set_span_in_context(NonRecordingSpan(span_context)),
-                ) as span:
-                    output = self.predictor.predict(**prediction_input)
+            tracer = trace.get_tracer("cog")
+            with tracer.start_as_current_span(
+                name="predictor.predict",
+                context=trace.set_span_in_context(NonRecordingSpan(span_context)),
+            ) as span:
+                try:
+                    with timeout(seconds=self.predict_timeout):
+                        output = self.predictor.predict(**prediction_input)
 
-                if isinstance(output, types.GeneratorType):
-                    self.predictor_pipe_writer.send(self.OutputType.GENERATOR)
-                    while True:
-                        try:
-                            self.predictor_pipe_writer.send(
-                                make_encodeable(next(output))
-                            )
-                        except StopIteration:
-                            break
-                else:
-                    self.predictor_pipe_writer.send(self.OutputType.SINGLE)
-                    self.predictor_pipe_writer.send(make_encodeable(output))
-            except Exception as e:
-                self.error_pipe_writer.send(e)
+                        if isinstance(output, types.GeneratorType):
+                            self.predictor_pipe_writer.send(self.OutputType.GENERATOR)
+                            while True:
+                                try:
+                                    self.predictor_pipe_writer.send(
+                                        make_encodeable(next(output))
+                                    )
+                                except StopIteration:
+                                    break
+                        else:
+                            self.predictor_pipe_writer.send(self.OutputType.SINGLE)
+                            self.predictor_pipe_writer.send(make_encodeable(output))
+                except Exception as e:
+                    # if it timed out there's no stack trace
+                    if type(e) != TimeoutError:
+                        traceback.print_exc()
+                    self.error_pipe_writer.send(e)
 
         self.done_pipe_writer.send(self.PROCESSING_DONE)
 

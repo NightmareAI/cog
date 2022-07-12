@@ -338,13 +338,24 @@ def test_queue_worker_error(docker_network, docker_image, redis_client):
         assert response == {
             "x-experimental-timestamps": {
                 "started_at": mock.ANY,
+            },
+            "status": "processing",
+            "output": None,
+            "logs": mock.ANY,  # includes a stack trace
+        }
+
+        response = json.loads(redis_client.blpop("response-queue", timeout=10)[1])
+        assert response == {
+            "x-experimental-timestamps": {
+                "started_at": mock.ANY,
                 "completed_at": mock.ANY,
             },
             "status": "failed",
             "output": None,
-            "logs": [],
+            "logs": mock.ANY,  # includes a stack trace
             "error": "over budget",
         }
+        assert "Traceback (most recent call last):" in response["logs"]
 
         response = redis_client.rpop("response-queue")
         assert response == None
@@ -425,13 +436,24 @@ def test_queue_worker_error_after_output(docker_network, docker_image, redis_cli
         assert response == {
             "x-experimental-timestamps": {
                 "started_at": mock.ANY,
+            },
+            "status": "processing",
+            "output": ["hello bar"],
+            "logs": mock.ANY,  # includes a stack trace
+        }
+
+        response = json.loads(redis_client.blpop("response-queue", timeout=10)[1])
+        assert response == {
+            "x-experimental-timestamps": {
+                "started_at": mock.ANY,
                 "completed_at": mock.ANY,
             },
             "status": "failed",
             "output": ["hello bar"],
-            "logs": ["a printed log message"],
+            "logs": mock.ANY,  # includes a stack trace
             "error": "mid run error",
         }
+        assert "Traceback (most recent call last):" in response["logs"]
 
         response = redis_client.rpop("response-queue")
         assert response == None
@@ -668,7 +690,7 @@ def test_queue_worker_timeout(docker_network, docker_image, redis_client):
                 "completed_at": mock.ANY,
             },
             "status": "succeeded",
-            "output": "it worked!",
+            "output": "it worked after 0.1 seconds!",
             "logs": [],
         }
 
@@ -680,7 +702,7 @@ def test_queue_worker_timeout(docker_network, docker_image, redis_client):
                     {
                         "id": predict_id,
                         "input": {
-                            "sleep_time": 5.0,
+                            "sleep_time": 3.0,
                         },
                         "response_queue": "response-queue",
                     }
@@ -708,6 +730,43 @@ def test_queue_worker_timeout(docker_network, docker_image, redis_client):
             "output": None,
             "logs": [],
             "error": "Prediction timed out",
+        }
+
+        predict_id = random_string(10)
+        redis_client.xadd(
+            name="predict-queue",
+            fields={
+                "value": json.dumps(
+                    {
+                        "id": predict_id,
+                        "input": {
+                            "sleep_time": 0.2,
+                        },
+                        "response_queue": "response-queue",
+                    }
+                ),
+            },
+        )
+
+        response = json.loads(redis_client.blpop("response-queue", timeout=10)[1])
+        assert response == {
+            "x-experimental-timestamps": {
+                "started_at": mock.ANY,
+            },
+            "status": "processing",
+            "output": None,
+            "logs": [],
+        }
+
+        response = json.loads(redis_client.blpop("response-queue", timeout=10)[1])
+        assert response == {
+            "x-experimental-timestamps": {
+                "started_at": mock.ANY,
+                "completed_at": mock.ANY,
+            },
+            "status": "succeeded",
+            "output": "it worked after 0.2 seconds!",
+            "logs": [],
         }
 
 
