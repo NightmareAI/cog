@@ -343,6 +343,7 @@ def test_queue_worker_error(docker_network, docker_image, redis_client):
             "output": None,
             "logs": mock.ANY,  # includes a stack trace
         }
+        assert "Traceback (most recent call last):" in response["logs"]
 
         response = json.loads(redis_client.blpop("response-queue", timeout=10)[1])
         assert response == {
@@ -441,6 +442,7 @@ def test_queue_worker_error_after_output(docker_network, docker_image, redis_cli
             "output": ["hello bar"],
             "logs": mock.ANY,  # includes a stack trace
         }
+        assert "Traceback (most recent call last):" in response["logs"]
 
         response = json.loads(redis_client.blpop("response-queue", timeout=10)[1])
         assert response == {
